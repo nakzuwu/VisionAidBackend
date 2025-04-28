@@ -7,6 +7,7 @@ from flask_mail import Message
 from app import mail
 from app.utils.token import generate_token
 from app.utils.token import verify_token
+from summarizer import Summarizer
 
 def register():
     data = request.get_json()
@@ -58,33 +59,6 @@ def login():
             }
         }), 200
     return jsonify({"msg": "Login gagal"}), 401
-
-# def forgot_password():
-#     data = request.get_json()
-#     username = data.get("username")
-#     email = data.get("email")
-#     new_password = data.get("new_password")
-#     confirm_password = data.get("confirm_password")
-
-#     if not all([username, email, new_password, confirm_password]):
-#         return jsonify({"msg": "Lengkapi semua data"}), 400
-
-#     if new_password != confirm_password:
-#         return jsonify({"msg": "Password tidak cocok"}), 400
-
-#     user = User.query.filter_by(username=username, email=email).first()
-
-#     if not user:
-#         return jsonify({"msg": "User tidak ditemukan atau data tidak cocok"}), 404
-
-#     if bcrypt.check_password_hash(user.password, new_password):
-#         return jsonify({"msg": "Password baru tidak boleh sama dengan password lama"}), 400
-
-#     hashed = bcrypt.generate_password_hash(new_password).decode('utf-8')
-#     user.password = hashed
-#     db.session.commit()
-
-#     return jsonify({"msg": "Password berhasil direset"}), 200
 
 def request_reset():
     data = request.get_json()
