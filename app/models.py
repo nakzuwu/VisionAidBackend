@@ -12,3 +12,12 @@ class User(db.Model):
 
     def generate_api_key(self):
         self.api_key = uuid.uuid4().hex
+
+class Note(db.Model):
+    id = db.Column(db.String(36), primary_key=True)  # pakai UUID string
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # << ini ditambah
+    title = db.Column(db.String(255), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False)
+
+    user = db.relationship('User', backref=db.backref('notes', lazy=True))
