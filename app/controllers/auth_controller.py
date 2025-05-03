@@ -7,7 +7,7 @@ from flask_mail import Message
 from app import mail
 from app.utils.token import generate_token
 from app.utils.token import verify_token
-from summarizer import Summarizer
+import random
 
 def register():
     data = request.get_json()
@@ -26,20 +26,22 @@ def register():
         return jsonify({"msg": "Username atau email sudah digunakan"}), 400
 
     hashed = bcrypt.generate_password_hash(password).decode('utf-8')
-    user = User(username=username, email=email, password=hashed)
-    user.generate_api_key()
+    otp_code = str(random.randint(100000, 999999))
 
+    user = User(username=username, email=email, password=hashed, otp=otp_code, is_verified=False)
+    user.generate_api_key()
     db.session.add(user)
     db.session.commit()
 
+    send_otp_email(email, otp_code)
+
     return jsonify({
-                "msg": "Registrasi berhasil",
-                "user": {
-                    "username": user.username,
-                    "email": user.email,
-                    "api_key": user.api_key
-                }
-            }), 201
+        "msg": "Registrasi berhasil, cek email untuk OTP",
+        "user": {
+            "username": user.username,
+            "email": user.email
+        }
+    }), 201
 
 def login():
     data = request.get_json()
@@ -111,3 +113,27 @@ def reset_password():
     db.session.commit()
 
     return jsonify({"msg": "Password berhasil direset"}), 200
+
+def send_otp_email(email, otp):
+    msg = Message("OTP Verifikasi VisionAid", recipients=[email])
+    msg.body = f"Kode OTP kamu adalah: {otp}"
+    mail.send(msg)
+
+def verify_otp():
+    data = request.get_json()
+    email = data.get('email')
+    otp = data.get('otp')
+
+    user = User.query.filter_by(email=email).first()
+
+    if not user:
+        return jsonify({"msg": "User tidak ditemukan"}), 404
+
+    if user.otp != otp:
+        return jsonify({"msg": "OTP salah"}), 400
+
+    user.is_verified = True
+    user.otp = None  # hapus OTP biar tidak bisa dipakai ulang
+    db.session.commit()
+
+    return jsonify({"msg": "Akun berhasil diverifikasi"}), 200
