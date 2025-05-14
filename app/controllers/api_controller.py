@@ -1,11 +1,16 @@
 from flask import request, jsonify
 from summarizer import Summarizer
+import easyocr
+import numpy as np
+import cv2
+import uuid
 from app.models import User
 from app import db
 from app.models import Note
 from datetime import datetime
 
 model = Summarizer()
+reader = easyocr.Reader(['id'], gpu=False)
 
 def summarize_text():
     api_key = request.headers.get('X-API-KEY')
@@ -107,3 +112,51 @@ def delete_note(note_id):
     db.session.commit()
 
     return jsonify({"msg": "Note deleted successfully"}), 200
+
+def ocr_image():
+    api_key = request.headers.get('X-API-KEY')
+    if not api_key:
+        return jsonify({"error": "API Key is required"}), 401
+
+    user = User.query.filter_by(api_key=api_key).first()
+    if not user:
+        return jsonify({"error": "Unauthorized. Invalid API Key."}), 401
+
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files['file']
+    img_bytes = file.read()
+
+    # Convert image bytes to OpenCV format
+    img_array = np.frombuffer(img_bytes, np.uint8)
+    image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+    # Jalankan OCR dan gabungkan hasil paragraf
+    results = reader.readtext(image, detail=0, paragraph=True)
+    extracted_text = "\n".join(results)
+
+    # Simpan ke database sebagai "pre-note"
+    timestamp = datetime.utcnow()
+    note_title = f"Scan - {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+
+    pre_note = Note(
+        id=str(uuid.uuid4()),  # Pastikan kamu `import uuid`
+        user_id=user.id,
+        title=note_title,
+        content=extracted_text,
+        updated_at=timestamp
+    )
+    db.session.add(pre_note)
+    db.session.commit()
+
+    return jsonify({
+        "text": extracted_text,
+        "note_id": pre_note.id,
+        "title": note_title,
+        "message": "OCR completed. Text saved as draft note.",
+        "options": {
+            "save_directly": True,
+            "summarize_available": True
+        }
+    }), 200

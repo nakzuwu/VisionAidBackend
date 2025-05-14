@@ -21,5 +21,7 @@ class Note(db.Model):
     title = db.Column(db.String(255), nullable=False)
     content = db.Column(db.Text, nullable=False)
     updated_at = db.Column(db.DateTime, nullable=False)
+    is_draft = db.Column(db.Boolean, default=True)
+
 
     user = db.relationship('User', backref=db.backref('notes', lazy=True))
