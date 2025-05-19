@@ -1,16 +1,27 @@
 from flask import request, jsonify
 from summarizer import Summarizer
+import re
 import easyocr
 import numpy as np
 import cv2
 import uuid
-from app.models import User
+import difflib
+from kbbi import KBBI
+from unidecode import unidecode
+from app.models import User, Note
 from app import db
-from app.models import Note
 from datetime import datetime
 
+kbbi_cache = {}
 model = Summarizer()
-reader = easyocr.Reader(['id'], gpu=False)
+reader = easyocr.Reader(['id', 'en'], gpu=False)
+
+kamus_kata = [
+    "belajar", "menulis", "rapi", "mudah", "dibaca", "muharjo", "seorang", "xenofobia",
+    "universal", "yang", "pada", "warga", "jazirah", "contohnya", "qatar",
+    "the", "quick", "brown", "fox", "jumps", "over", "lazy",
+    "air", "beriak", "tanda", "tak", "dalam"
+]
 
 def summarize_text():
     api_key = request.headers.get('X-API-KEY')
@@ -113,6 +124,44 @@ def delete_note(note_id):
 
     return jsonify({"msg": "Note deleted successfully"}), 200
 
+
+
+# ======================================KODE OCR===============================================
+
+
+
+def is_valid_kbbi(word):
+    word = word.lower()
+    if word in kbbi_cache:
+        return kbbi_cache[word]
+    try:
+        KBBI.lookup(word)
+        kbbi_cache[word] = True
+        return True
+    except:
+        kbbi_cache[word] = False
+        return False
+
+def spell_correct(word, threshold=0.85):
+    """Gunakan KBBI atau kamus lokal untuk koreksi kata"""
+    if is_valid_kbbi(word):
+        return word
+    hasil = difflib.get_close_matches(word.lower(), kamus_kata, n=1, cutoff=threshold)
+    return hasil[0] if hasil else word
+
+def postprocess_text(teks):
+    """Bersihkan teks dari simbol aneh & koreksi ejaan dasar"""
+    teks = unidecode(teks)
+    teks = re.sub(r'[^\w\s.,]', '', teks)
+    hasil = [spell_correct(kata) for kata in teks.split()]
+    return ' '.join(hasil)
+
+def preprocess_image(image):
+    """Grayscale + sedikit blur untuk mengurangi noise"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    return cv2.cvtColor(blurred, cv2.COLOR_GRAY2BGR)
+
 def ocr_image():
     api_key = request.headers.get('X-API-KEY')
     if not api_key:
@@ -128,24 +177,39 @@ def ocr_image():
     file = request.files['file']
     img_bytes = file.read()
 
-    # Convert image bytes to OpenCV format
     img_array = np.frombuffer(img_bytes, np.uint8)
     image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
-    # Jalankan OCR dan gabungkan hasil paragraf
-    results = reader.readtext(image, detail=0, paragraph=True)
-    extracted_text = "\n".join(results)
+    preprocessed_image = preprocess_image(image)
 
-    # Simpan ke database sebagai "pre-note"
+    results = reader.readtext(preprocessed_image, detail=1, paragraph=True)
+
+    filtered_results = []
+    for res in results:
+        if len(res) == 3:
+            _, text, confidence = res
+            if confidence > 0.5 and re.search(r'[a-zA-Z0-9]', text):
+                filtered_results.append(text)
+        elif len(res) == 2:
+            _, text = res
+            if re.search(r'[a-zA-Z0-9]', text):
+                filtered_results.append(text)
+
+    extracted_text = "\n".join(filtered_results)
+
+    # Koreksi dan normalisasi
+    extracted_text = postprocess_text(extracted_text)
+
     timestamp = datetime.utcnow()
     note_title = f"Scan - {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
 
     pre_note = Note(
-        id=str(uuid.uuid4()),  # Pastikan kamu `import uuid`
+        id=str(uuid.uuid4()),
         user_id=user.id,
         title=note_title,
         content=extracted_text,
-        updated_at=timestamp
+        updated_at=timestamp,
+        is_draft=1
     )
     db.session.add(pre_note)
     db.session.commit()
@@ -156,7 +220,7 @@ def ocr_image():
         "title": note_title,
         "message": "OCR completed. Text saved as draft note.",
         "options": {
-            "save_directly": True,
-            "summarize_available": True
+            "save_directly": False,  # default sebagai draft
+            "summarize_available": True  # user bisa pilih untuk merangkum nanti
         }
     }), 200
