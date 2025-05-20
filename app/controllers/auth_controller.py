@@ -8,6 +8,18 @@ from app import mail
 from app.utils.token import generate_token
 from app.utils.token import verify_token
 import random
+from datetime import timedelta
+
+def create_custom_token(user_id):
+    additional_claims = {
+        "sub": user_id,
+        "type": "access"
+    }
+    return create_access_token(
+        identity=user_id,
+        additional_claims=additional_claims,
+        expires_delta=timedelta(days=1)
+    )
 
 def register():
     data = request.get_json()
@@ -50,7 +62,7 @@ def login():
 
     user = User.query.filter_by(username=username).first()
     if user and bcrypt.check_password_hash(user.password, password):
-        access_token = create_access_token(identity=user.id)
+        access_token = create_custom_token(user.id)
         return jsonify({
             "msg": "Login berhasil",
             "token": access_token,
