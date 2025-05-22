@@ -1,4 +1,4 @@
-from flask import request, jsonify
+from flask import request, jsonify, url_for
 from app import db, bcrypt
 from app.models import User
 from flask_jwt_extended import create_access_token
@@ -9,6 +9,9 @@ from app.utils.token import generate_token
 from app.utils.token import verify_token
 import random
 from datetime import timedelta
+from flask_dance.contrib.google import make_google_blueprint, google
+from extensions import oauth
+google = oauth.create_client('google')
 
 def create_custom_token(user_id):
     additional_claims = {
@@ -73,6 +76,45 @@ def login():
             }
         }), 200
     return jsonify({"msg": "Login gagal"}), 401
+    
+def login_google():
+    redirect_uri = url_for('auth.login_callback', _external=True)
+    return google.authorize_redirect(redirect_uri)
+
+def login_callback():
+    token = google.authorize_access_token()
+    resp = google.get('userinfo')
+    user_info = resp.json()
+
+    email = user_info["email"]
+    username = user_info["name"].replace(" ", "").lower()
+
+    # Cek user di database
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        user = User(
+            username=username,
+            email=email,
+            password="",
+            otp="",
+            is_verified=True
+        )
+        user.generate_api_key()
+        db.session.add(user)
+        db.session.commit()
+
+    # Buat token
+    access_token = create_custom_token(user.id)
+
+    return jsonify({
+        "msg": "Login OAuth berhasil",
+        "token": access_token,
+        "user": {
+            "username": user.username,
+            "email": user.email,
+            "api_key": user.api_key
+        }
+    }), 200
 
 def request_reset():
     data = request.get_json()
