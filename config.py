@@ -19,3 +19,4 @@ class Config:
     MAIL_USERNAME = "enkajet439@gmail.com"
     MAIL_PASSWORD = "poel svfb hubs tgea"
     MAIL_DEFAULT_SENDER = "jamal"
+    

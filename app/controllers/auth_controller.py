@@ -11,6 +11,7 @@ import random
 from datetime import timedelta
 from flask_dance.contrib.google import make_google_blueprint, google
 from extensions import oauth
+from datetime import datetime, timedelta
 google = oauth.create_client('google')
 
 def create_custom_token(user_id):
@@ -23,6 +24,11 @@ def create_custom_token(user_id):
         additional_claims=additional_claims,
         expires_delta=timedelta(days=1)
     )
+
+def send_otp_email(email, otp):
+    msg = Message("OTP Verifikasi VisionAid", recipients=[email])
+    msg.body = f"Kode OTP kamu adalah: {otp}"
+    mail.send(msg)
 
 def register():
     data = request.get_json()
@@ -125,7 +131,7 @@ def request_reset():
         return jsonify({"msg": "Email tidak ditemukan"}), 404
 
     token = generate_token(user.email)
-    reset_link = f"http://localhost:5000/api/auth/verify-reset-token?token={token}"
+    reset_link = f"http://localhost:5000/reset-password?token={token}"
 
     msg = Message("Reset Password VisionAid", recipients=[user.email])
     msg.body = f"Klik link berikut untuk reset password: {reset_link}"
@@ -168,26 +174,28 @@ def reset_password():
 
     return jsonify({"msg": "Password berhasil direset"}), 200
 
-def send_otp_email(email, otp):
-    msg = Message("OTP Verifikasi VisionAid", recipients=[email])
-    msg.body = f"Kode OTP kamu adalah: {otp}"
-    mail.send(msg)
 
 def verify_otp():
     data = request.get_json()
-    email = data.get('email')
-    otp = data.get('otp')
+    email = data.get("email")
+    otp_input = data.get("otp")
 
     user = User.query.filter_by(email=email).first()
 
     if not user:
         return jsonify({"msg": "User tidak ditemukan"}), 404
 
-    if user.otp != otp:
+    # Cek apakah sudah lebih dari 5 menit sejak user dibuat
+    if datetime.utcnow() > user.created_at + timedelta(minutes=5):
+        db.session.delete(user)
+        db.session.commit()
+        return jsonify({"msg": "OTP expired. Registrasi dibatalkan."}), 400
+
+    if user.otp != otp_input:
         return jsonify({"msg": "OTP salah"}), 400
 
     user.is_verified = True
-    user.otp = None  # hapus OTP biar tidak bisa dipakai ulang
+    user.otp = None
     db.session.commit()
 
-    return jsonify({"msg": "Akun berhasil diverifikasi"}), 200
+    return jsonify({"msg": "Verifikasi berhasil"}), 200
