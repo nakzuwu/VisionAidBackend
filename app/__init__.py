@@ -4,6 +4,8 @@ from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager
 from flask_mail import Mail
 from dotenv import load_dotenv
+from extensions import oauth, init_oauth
+from flask_cors import CORS
 
 load_dotenv()
 
@@ -21,6 +23,8 @@ def create_app():
     bcrypt.init_app(app)
     jwt.init_app(app)
     mail.init_app(app) 
+    init_oauth(app)
+    CORS(app)
     
     from app.routes.api_route import auth_bs
     from app.routes.auth_route import auth_bp

@@ -9,7 +9,7 @@ class User(db.Model):
     password = db.Column(db.String(128), nullable=False)
     api_key = db.Column(db.String(64), unique=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    otp = db.Column(db.String(6), nullable=True)
+    otp = db.Column(db.String(6))
     is_verified = db.Column(db.Boolean, default=False)
 
     def generate_api_key(self):
