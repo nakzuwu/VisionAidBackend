@@ -59,9 +59,15 @@ def create_or_update_note():
     title = data.get('title')
     content = data.get('content')
     updated_at = data.get('updated_at')
+    is_draft = data.get('is_draft', 0)  # Default ke 0 (final)
 
     if not note_id or not title:
         return jsonify({"error": "Missing fields"}), 400
+
+    try:
+        updated_at_dt = datetime.strptime(updated_at, "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        return jsonify({"error": "Invalid date format for updated_at"}), 400
 
     note = Note.query.filter_by(id=note_id, user_id=user.id).first()
 
@@ -69,7 +75,8 @@ def create_or_update_note():
         # Update note
         note.title = title
         note.content = content
-        note.updated_at = datetime.strptime(updated_at, "%Y-%m-%dT%H:%M:%S")
+        note.updated_at = updated_at_dt
+        note.is_draft = is_draft
     else:
         # Create note
         note = Note(
@@ -77,7 +84,8 @@ def create_or_update_note():
             user_id=user.id,
             title=title,
             content=content,
-            updated_at=datetime.strptime(updated_at, "%Y-%m-%dT%H:%M:%S")
+            updated_at=updated_at_dt,
+            is_draft=is_draft
         )
         db.session.add(note)
 
