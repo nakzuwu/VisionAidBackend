@@ -13,3 +13,4 @@ auth_bp.route('/reset-password', methods=['POST'])(auth_controller.reset_passwor
 auth_bp.route('/verify-otp', methods=['POST'])(auth_controller.verify_otp)
 auth_bp.route("/login/google")(auth_controller.login_google)
 auth_bp.route("/login/callback")(auth_controller.login_callback)
+auth_bp.route('/oauth/login', methods=['POST'])(auth_controller.login_google)
