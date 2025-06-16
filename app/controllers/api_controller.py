@@ -88,7 +88,7 @@ def create_or_update_note():
             title=title,
             content=content,
             updated_at=updated_at_dt,
-            is_draft=is_draft
+            is_draft=is_draft,
             folder = folder
         )
         db.session.add(note)
