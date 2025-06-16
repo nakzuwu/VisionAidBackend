@@ -60,6 +60,8 @@ def create_or_update_note():
     content = data.get('content')
     updated_at = data.get('updated_at')
     is_draft = data.get('is_draft', 0)  # Default ke 0 (final)
+    folder = data.get('folder', 'Tanpa Folder')
+
 
     if not note_id or not title:
         return jsonify({"error": "Missing fields"}), 400
@@ -77,6 +79,7 @@ def create_or_update_note():
         note.content = content
         note.updated_at = updated_at_dt
         note.is_draft = is_draft
+        note.folder = folder
     else:
         # Create note
         note = Note(
@@ -86,6 +89,7 @@ def create_or_update_note():
             content=content,
             updated_at=updated_at_dt,
             is_draft=is_draft
+            folder = folder
         )
         db.session.add(note)
 
