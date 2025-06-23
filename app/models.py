@@ -25,3 +25,14 @@ class Note(db.Model):
 
 
     user = db.relationship('User', backref=db.backref('notes', lazy=True))
+
+class LoginSession(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    device_info = db.Column(db.String(255), nullable=False)
+    ip_address = db.Column(db.String(64))
+    login_time = db.Column(db.DateTime, default=datetime.utcnow)
+    jwt_jti = db.Column(db.String(128), nullable=False)
+
+    user = db.relationship('User', backref=db.backref('login_sessions', lazy=True))
+

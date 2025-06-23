@@ -1,7 +1,7 @@
 from flask import request, jsonify, url_for,current_app
 from app import db, bcrypt
-from app.models import User
-from flask_jwt_extended import create_access_token
+from app.models import User, LoginSession
+from flask_jwt_extended import create_access_token, get_jwt, jwt_required, decode_token
 from app.utils.api_key_generator import generate_api_key
 from flask_mail import Message
 from app import mail
@@ -14,7 +14,9 @@ from extensions import oauth
 from datetime import datetime, timedelta
 from flask import request
 from google.oauth2 import id_token
-from google.auth.transport import requests as grequests
+from google.auth.transport import requests
+from blacklist_token import blacklisted_tokens
+
 google = oauth.create_client('google')
 
 def create_custom_token(user_id):
@@ -75,7 +77,15 @@ def login():
 
     user = User.query.filter_by(username=username).first()
     if user and bcrypt.check_password_hash(user.password, password):
-        access_token = create_custom_token(user.id)
+        access_token = create_access_token(identity=str(user.id))
+        
+        # ✅ Ambil JTI dari token yang baru dibuat
+        decoded = decode_token(access_token)
+        jti = decoded["jti"]
+
+        # (Opsional) Simpan jti ke tabel LoginSession misalnya
+        # save_login_session(user_id=user.id, jti=jti)
+
         return jsonify({
             "msg": "Login berhasil",
             "token": access_token,
@@ -85,7 +95,14 @@ def login():
                 "api_key": user.api_key
             }
         }), 200
+
     return jsonify({"msg": "Login gagal"}), 401
+
+@jwt_required()
+def logout():
+    jti = get_jwt()["jti"]  
+    blacklisted_tokens.add(jti)
+    return jsonify({"msg": "Logout berhasil"}), 200
     
 def login_google():
     redirect_uri = url_for('auth.login_callback', _external=True)
@@ -126,25 +143,36 @@ def login_callback():
         }
     }), 200
 
-
 def login_google_token():
-    data = request.get_json()
-    token = data.get("id_token")
-
-    if not token:
-        return jsonify({"msg": "Token tidak ditemukan"}), 400
-
     try:
-        # Ambil CLIENT ID dari config
-        client_id = current_app.config.get("GOOGLE_CLIENT_ID")
+        data = request.get_json()
+        print("Incoming JSON:", data)  # ✅ Log input dari Flutter
 
-        # Verifikasi token menggunakan Google API
+        token = data.get("id_token")
+        if not token:
+            print("❌ Token not found in JSON")
+            return jsonify({"msg": "Token tidak ditemukan"}), 400
+
+        client_id = current_app.config.get("GOOGLE_CLIENT_ID")
+        if not client_id:
+            print("❌ GOOGLE_CLIENT_ID not set in config")
+            return jsonify({"msg": "Konfigurasi server tidak lengkap"}), 500
+
+        print("✅ Token received:", token[:30] + "...")  # hanya tampil sebagian
+        print("✅ Verifying with client_id:", client_id)
+
+        # Verifikasi token Google
         idinfo = id_token.verify_oauth2_token(token, requests.Request(), client_id)
 
-        email = idinfo["email"]
-        username = idinfo["name"].replace(" ", "").lower()
+        email = idinfo.get("email")
+        username = idinfo.get("name", "user").replace(" ", "").lower()
 
-        # Lanjutkan login user seperti sebelumnya...
+        print("✅ Google user info:", {"email": email, "username": username})
+
+        if not email:
+            return jsonify({"msg": "Email tidak ditemukan dalam token"}), 400
+
+        # Cek user
         user = User.query.filter_by(email=email).first()
         if not user:
             user = User(
@@ -157,6 +185,9 @@ def login_google_token():
             user.generate_api_key()
             db.session.add(user)
             db.session.commit()
+            print("✅ User baru dibuat:", username)
+        else:
+            print("✅ User ditemukan:", username)
 
         access_token = create_custom_token(user.id)
 
@@ -171,7 +202,12 @@ def login_google_token():
         }), 200
 
     except ValueError as e:
+        print("❌ Error verifikasi token:", str(e))
         return jsonify({"msg": "Token tidak valid", "error": str(e)}), 400
+
+    except Exception as e:
+        print("❌ Error lain:", str(e))
+        return jsonify({"msg": "Terjadi kesalahan", "error": str(e)}), 500
 
 
 def request_reset():
@@ -251,3 +287,14 @@ def verify_otp():
     db.session.commit()
 
     return jsonify({"msg": "Verifikasi berhasil"}), 200
+
+@jwt_required()
+def get_login_history():
+    current_user_id = get_jwt()
+    sessions = LoginSession.query.filter_by(user_id=current_user_id).all()
+
+    return jsonify([{
+        "device": s.device_info,
+        "ip": s.ip_address,
+        "login_time": s.login_time.isoformat()
+    } for s in sessions]), 200

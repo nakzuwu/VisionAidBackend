@@ -1,5 +1,6 @@
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 from summarizer import Summarizer
+import os
 import re
 import easyocr
 import numpy as np
@@ -10,6 +11,7 @@ from kbbi import KBBI
 from unidecode import unidecode
 from app.models import User, Note
 from app import db
+from werkzeug.utils import secure_filename
 from datetime import datetime
 
 kbbi_cache = {}
@@ -45,96 +47,113 @@ def summarize_text():
         "summary": summary
     }), 200
 
-def create_or_update_note():
-    api_key = request.headers.get('X-API-KEY')
-    if not api_key:
-        return jsonify({"error": "API Key is required"}), 401
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
 
-    user = User.query.filter_by(api_key=api_key).first()
-    if not user:
-        return jsonify({"error": "Unauthorized. Invalid API Key."}), 401
+def create_note():
+    data = request.json
+    note_id = data.get('id') or str(uuid.uuid4())
+    title = data.get('title', 'Untitled Note')
+    content = data.get('content', '')
+    folder = data.get('folder', 'Default')
+    created_at = datetime.utcnow().isoformat()
+    updated_at = created_at
 
-    data = request.get_json()
-    note_id = data.get('id')
+    cursor = db.cursor()
+    cursor.execute(
+        'INSERT INTO notes (id, title, content, folder, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s)',
+        (note_id, title, content, folder, created_at, updated_at)
+    )
+    db.commit()
+
+    return jsonify({
+        'id': note_id, 'title': title, 'content': content,
+        'folder': folder, 'created_at': created_at, 'updated_at': updated_at
+    }), 201
+
+def update_note(note_id):
+    data = request.json
     title = data.get('title')
     content = data.get('content')
-    updated_at = data.get('updated_at')
-    is_draft = data.get('is_draft', 0)  # Default ke 0 (final)
-    folder = data.get('folder', 'Tanpa Folder')
+    folder = data.get('folder')
+    updated_at = datetime.utcnow().isoformat()
 
+    cursor = db.cursor()
+    cursor.execute(
+        'UPDATE notes SET title=%s, content=%s, folder=%s, updated_at=%s WHERE id=%s',
+        (title, content, folder, updated_at, note_id)
+    )
+    db.commit()
 
-    if not note_id or not title:
-        return jsonify({"error": "Missing fields"}), 400
+    if cursor.rowcount == 0:
+        return jsonify({'error': 'Note not found'}), 404
 
-    try:
-        updated_at_dt = datetime.strptime(updated_at, "%Y-%m-%dT%H:%M:%S")
-    except Exception:
-        return jsonify({"error": "Invalid date format for updated_at"}), 400
+    return jsonify({
+        'id': note_id, 'title': title, 'content': content,
+        'folder': folder, 'updated_at': updated_at
+    }), 200
 
-    note = Note.query.filter_by(id=note_id, user_id=user.id).first()
+def get_note(note_id):
+    cursor = db.cursor()
+    cursor.execute('SELECT id, title, content, folder, created_at, updated_at FROM notes WHERE id=%s', (note_id,))
+    note = cursor.fetchone()
 
-    if note:
-        # Update note
-        note.title = title
-        note.content = content
-        note.updated_at = updated_at_dt
-        note.is_draft = is_draft
-        note.folder = folder
-    else:
-        # Create note
-        note = Note(
-            id=note_id,
-            user_id=user.id,
-            title=title,
-            content=content,
-            updated_at=updated_at_dt,
-            is_draft=is_draft,
-            folder = folder
-        )
-        db.session.add(note)
-
-    db.session.commit()
-
-    return jsonify({"msg": "Note synced successfully!"}), 200
-
-def get_notes():
-    api_key = request.headers.get('X-API-KEY')
-    if not api_key:
-        return jsonify({"error": "API Key is required"}), 401
-
-    user = User.query.filter_by(api_key=api_key).first()
-    if not user:
-        return jsonify({"error": "Unauthorized. Invalid API Key."}), 401
-
-    notes = Note.query.filter_by(user_id=user.id).all()
-    result = []
-    for note in notes:
-        result.append({
-            "id": note.id,
-            "title": note.title,
-            "content": note.content,
-            "updated_at": note.updated_at.isoformat()
-        })
-
-    return jsonify(result), 200
-
-def delete_note(note_id):
-    api_key = request.headers.get('X-API-KEY')
-    if not api_key:
-        return jsonify({"error": "API Key is required"}), 401
-
-    user = User.query.filter_by(api_key=api_key).first()
-    if not user:
-        return jsonify({"error": "Unauthorized. Invalid API Key."}), 401
-
-    note = Note.query.filter_by(id=note_id, user_id=user.id).first()
     if not note:
-        return jsonify({"error": "Note not found"}), 404
+        return jsonify({'error': 'Note not found'}), 404
 
-    db.session.delete(note)
-    db.session.commit()
+    cursor.execute('SELECT filename FROM images WHERE note_id=%s', (note_id,))
+    images = cursor.fetchall()
 
-    return jsonify({"msg": "Note deleted successfully"}), 200
+    return jsonify({
+        'id': note[0], 'title': note[1], 'content': note[2], 'folder': note[3],
+        'created_at': note[4], 'updated_at': note[5],
+        'images': [img[0] for img in images]
+    }), 200
+
+def get_all_notes():
+    cursor = db.cursor()
+    cursor.execute('SELECT id, title, folder, created_at, updated_at FROM notes')
+    notes = cursor.fetchall()
+    return jsonify([
+        {'id': n[0], 'title': n[1], 'folder': n[2], 'created_at': n[3], 'updated_at': n[4]}
+        for n in notes
+    ]), 200
+
+def get_folders():
+    cursor = db.cursor()
+    cursor.execute('SELECT DISTINCT folder FROM notes')
+    folders = cursor.fetchall()
+    return jsonify([f[0] for f in folders]), 200
+
+def upload_image(note_id):
+    cursor = db.cursor()
+    cursor.execute('SELECT id FROM notes WHERE id=%s', (note_id,))
+    if not cursor.fetchone():
+        return jsonify({'error': 'Note not found'}), 404
+
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+
+        image_id = uuid.uuid4().hex
+        cursor.execute(
+            'INSERT INTO images (id, note_id, filename) VALUES (%s, %s, %s)',
+            (image_id, note_id, filename)
+        )
+        db.commit()
+
+        return jsonify({'id': image_id, 'filename': filename, 'url': f'/uploads/{filename}'}), 201
+
+    return jsonify({'error': 'Invalid file type'}), 400
 
 
 
