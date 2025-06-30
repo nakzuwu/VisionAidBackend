@@ -13,6 +13,7 @@ auth_bs.route('/notes/<note_id>', methods=['GET'])(api_controller.get_note)
 auth_bs.route('/notes', methods=['GET'])(api_controller.get_all_notes)
 auth_bs.route('/notes/folders', methods=['GET'])(api_controller.get_folders)
 auth_bs.route('/notes/<note_id>/images', methods=['POST'])(api_controller.upload_image)
+auth_bs.route('/transcribe', methods=['POST'])(api_controller.transcribe_audio)
 
 auth_bs.route('/uploads/<filename>')
 def uploaded_file(filename):

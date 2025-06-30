@@ -1,3 +1,4 @@
+from functools import wraps
 from flask import request, jsonify, current_app
 from summarizer import Summarizer
 import os
@@ -12,11 +13,19 @@ from unidecode import unidecode
 from app.models import User, Note
 from app import db
 from werkzeug.utils import secure_filename
+from flask_jwt_extended import jwt_required
 from datetime import datetime
+import whisper
+from pathlib import Path
 
 kbbi_cache = {}
 model = Summarizer()
 reader = easyocr.Reader(['id', 'en'], gpu=False)
+model = whisper.load_model("base") 
+
+UPLOAD_FOLDER = 'uploads'
+Path(UPLOAD_FOLDER).mkdir(exist_ok=True)
+
 
 kamus_kata = [
     "belajar", "menulis", "rapi", "mudah", "dibaca", "muharjo", "seorang", "xenofobia",
@@ -154,6 +163,26 @@ def upload_image(note_id):
         return jsonify({'id': image_id, 'filename': filename, 'url': f'/uploads/{filename}'}), 201
 
     return jsonify({'error': 'Invalid file type'}), 400
+
+@jwt_required()
+def transcribe_audio():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+
+    audio_file = request.files['file']
+    if audio_file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+
+    filename = secure_filename(audio_file.filename)
+    save_path = os.path.join(UPLOAD_FOLDER, filename)
+    audio_file.save(save_path)
+
+    try:
+        result = model.transcribe(save_path, language="indonesian")
+        transcript = result['text']
+        return jsonify({'transcript': transcript}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 
