@@ -10,7 +10,7 @@ import uuid
 import difflib
 from kbbi import KBBI
 from unidecode import unidecode
-from app.models import User, Note
+from app.models import User, Note, Reminder
 from app import db
 from werkzeug.utils import secure_filename
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -131,8 +131,18 @@ def sync_reminder():
 
     reminder = Reminder.query.filter_by(id=data['id'], user_id=user_id).first()
 
-    client_updated = datetime.fromisoformat(data['updated_at'])
-    client_created = datetime.fromisoformat(data['created_at'])
+    client_updated_str = data.get('updated_at')
+    if client_updated_str:
+        client_updated = datetime.fromisoformat(client_updated_str)
+    else:
+        client_updated = datetime.utcnow()
+
+    client_created_str = data.get('created_at')
+    if client_created_str:
+        client_created = datetime.fromisoformat(client_created_str)
+    else:
+        client_created = datetime.utcnow()
+
     client_day = datetime.fromisoformat(data['day']).date()
 
     if reminder:
