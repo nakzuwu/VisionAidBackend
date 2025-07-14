@@ -13,15 +13,15 @@ from unidecode import unidecode
 from app.models import User, Note
 from app import db
 from werkzeug.utils import secure_filename
-from flask_jwt_extended import jwt_required
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
 import whisper
 from pathlib import Path
 
 kbbi_cache = {}
-model = Summarizer()
 reader = easyocr.Reader(['id', 'en'], gpu=False)
 model = whisper.load_model("base") 
+model_summary = Summarizer()
 
 UPLOAD_FOLDER = 'uploads'
 Path(UPLOAD_FOLDER).mkdir(exist_ok=True)
@@ -50,7 +50,7 @@ def summarize_text():
     if not input_text:
         return jsonify({"error": "No text provided."}), 400
 
-    summary = model(input_text, min_length=50, max_length=150)
+    summary = model_summary(input_text, min_length=50, max_length=150)
 
     return jsonify({
         "summary": summary
@@ -60,109 +60,129 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
 
-def create_note():
-    data = request.json
-    note_id = data.get('id') or str(uuid.uuid4())
-    title = data.get('title', 'Untitled Note')
-    content = data.get('content', '')
-    folder = data.get('folder', 'Default')
-    created_at = datetime.utcnow().isoformat()
-    updated_at = created_at
+@jwt_required()
+def sync_note():
+    user_id = get_jwt_identity()
+    data = request.get_json()
 
-    cursor = db.cursor()
-    cursor.execute(
-        'INSERT INTO notes (id, title, content, folder, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s)',
-        (note_id, title, content, folder, created_at, updated_at)
-    )
-    db.commit()
+    if not data or 'id' not in data:
+        return jsonify({"error": "Invalid payload"}), 400
 
-    return jsonify({
-        'id': note_id, 'title': title, 'content': content,
-        'folder': folder, 'created_at': created_at, 'updated_at': updated_at
-    }), 201
+    note = Note.query.filter_by(id=data['id'], user_id=user_id).first()
 
-def update_note(note_id):
-    data = request.json
-    title = data.get('title')
-    content = data.get('content')
-    folder = data.get('folder')
-    updated_at = datetime.utcnow().isoformat()
+    client_updated = datetime.fromisoformat(data['updated_at'])
+    client_created = datetime.fromisoformat(data['created_at'])
+    client_last_opened = datetime.fromisoformat(data['last_opened']) if data.get('last_opened') else None
 
-    cursor = db.cursor()
-    cursor.execute(
-        'UPDATE notes SET title=%s, content=%s, folder=%s, updated_at=%s WHERE id=%s',
-        (title, content, folder, updated_at, note_id)
-    )
-    db.commit()
+    if note:
+        if client_updated > note.updated_at:
+            note.title = data['title']
+            note.content = data['content']
+            note.folder = data['folder']
+            note.images = data.get('images', [])
+            note.updated_at = client_updated
+            note.last_opened = client_last_opened or note.last_opened
+            note.is_deleted = data.get('is_deleted', False)
+    else:
+        note = Note(
+            id=data['id'],
+            user_id=user_id,
+            title=data['title'],
+            content=data['content'],
+            folder=data['folder'],
+            images=data.get('images', []),
+            created_at=client_created,
+            updated_at=client_updated,
+            last_opened=client_last_opened,
+            is_deleted=data.get('is_deleted', False)
+        )
+        db.session.add(note)
 
-    if cursor.rowcount == 0:
-        return jsonify({'error': 'Note not found'}), 404
+    db.session.commit()
+    return jsonify({"msg": "Note synced"}), 200
 
-    return jsonify({
-        'id': note_id, 'title': title, 'content': content,
-        'folder': folder, 'updated_at': updated_at
-    }), 200
 
-def get_note(note_id):
-    cursor = db.cursor()
-    cursor.execute('SELECT id, title, content, folder, created_at, updated_at FROM notes WHERE id=%s', (note_id,))
-    note = cursor.fetchone()
+@jwt_required()
+def get_notes():
+    user_id = get_jwt_identity()
+    notes = Note.query.filter_by(user_id=user_id, is_deleted=False).all()
+    return jsonify([n.to_dict() for n in notes])
+
+@jwt_required()
+def delete_note(note_id):
+    user_id = get_jwt_identity()
+    note = Note.query.filter_by(id=note_id, user_id=user_id).first()
 
     if not note:
-        return jsonify({'error': 'Note not found'}), 404
+        return jsonify({"error": "Note not found"}), 404
 
-    cursor.execute('SELECT filename FROM images WHERE note_id=%s', (note_id,))
-    images = cursor.fetchall()
+    note.is_deleted = True
+    note.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({"msg": "Note deleted"}), 200
 
-    return jsonify({
-        'id': note[0], 'title': note[1], 'content': note[2], 'folder': note[3],
-        'created_at': note[4], 'updated_at': note[5],
-        'images': [img[0] for img in images]
-    }), 200
+@jwt_required()
+def sync_reminder():
+    user_id = get_jwt_identity()
+    data = request.get_json()
 
-def get_all_notes():
-    cursor = db.cursor()
-    cursor.execute('SELECT id, title, folder, created_at, updated_at FROM notes')
-    notes = cursor.fetchall()
-    return jsonify([
-        {'id': n[0], 'title': n[1], 'folder': n[2], 'created_at': n[3], 'updated_at': n[4]}
-        for n in notes
-    ]), 200
+    if not data or 'id' not in data:
+        return jsonify({"error": "Invalid payload"}), 400
 
-def get_folders():
-    cursor = db.cursor()
-    cursor.execute('SELECT DISTINCT folder FROM notes')
-    folders = cursor.fetchall()
-    return jsonify([f[0] for f in folders]), 200
+    reminder = Reminder.query.filter_by(id=data['id'], user_id=user_id).first()
 
-def upload_image(note_id):
-    cursor = db.cursor()
-    cursor.execute('SELECT id FROM notes WHERE id=%s', (note_id,))
-    if not cursor.fetchone():
-        return jsonify({'error': 'Note not found'}), 404
+    client_updated = datetime.fromisoformat(data['updated_at'])
+    client_created = datetime.fromisoformat(data['created_at'])
+    client_day = datetime.fromisoformat(data['day']).date()
 
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
-
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-
-        image_id = uuid.uuid4().hex
-        cursor.execute(
-            'INSERT INTO images (id, note_id, filename) VALUES (%s, %s, %s)',
-            (image_id, note_id, filename)
+    if reminder:
+        if client_updated > reminder.updated_at:
+            reminder.title = data['title']
+            reminder.description = data['description']
+            reminder.date = data['date']
+            reminder.time = data.get('time', '')
+            reminder.color = data.get('color', '#0000FF')
+            reminder.day = client_day
+            reminder.updated_at = client_updated
+            reminder.is_deleted = data.get('is_deleted', False)
+    else:
+        reminder = Reminder(
+            id=data['id'],
+            user_id=user_id,
+            title=data['title'],
+            description=data.get('description', ''),
+            date=data['date'],
+            time=data.get('time', ''),
+            color=data.get('color', '#0000FF'),
+            day=client_day,
+            created_at=client_created,
+            updated_at=client_updated,
+            is_deleted=data.get('is_deleted', False)
         )
-        db.commit()
+        db.session.add(reminder)
 
-        return jsonify({'id': image_id, 'filename': filename, 'url': f'/uploads/{filename}'}), 201
+    db.session.commit()
+    return jsonify({"msg": "Reminder synced"}), 200
 
-    return jsonify({'error': 'Invalid file type'}), 400
+@jwt_required()
+def get_reminders():
+    user_id = get_jwt_identity()
+    reminders = Reminder.query.filter_by(user_id=user_id, is_deleted=False).all()
+    return jsonify([r.to_dict() for r in reminders])
+
+@jwt_required()
+def delete_reminder(reminder_id):
+    user_id = get_jwt_identity()
+    reminder = Reminder.query.filter_by(id=reminder_id, user_id=user_id).first()
+
+    if not reminder:
+        return jsonify({"error": "Reminder not found"}), 404
+
+    reminder.is_deleted = True
+    reminder.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({"msg": "Reminder deleted"}), 200
+
 
 @jwt_required()
 def transcribe_audio():

@@ -5,3 +5,5 @@ __pycache__/
 instance/
 config.py
 config
+firebase-adminsdk.json
+firebase-adminsdk.json

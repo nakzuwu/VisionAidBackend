@@ -1,21 +1,30 @@
 from flask import request, jsonify, url_for,current_app
-from app import db, bcrypt
+from app import db, bcrypt,mail
 from app.models import User, LoginSession
-from flask_jwt_extended import create_access_token, get_jwt, jwt_required, decode_token
+from flask_jwt_extended import create_access_token, get_jwt, jwt_required, decode_token, get_jwt_identity
 from app.utils.api_key_generator import generate_api_key
 from flask_mail import Message
-from app import mail
 from app.utils.token import generate_token
+from werkzeug.security import check_password_hash, generate_password_hash
 from app.utils.token import verify_token
 import random
 from datetime import timedelta
 from flask_dance.contrib.google import make_google_blueprint, google
 from extensions import oauth
 from datetime import datetime, timedelta
-from flask import request
+import uuid
+from flask import request, render_template
 from google.oauth2 import id_token
 from google.auth.transport import requests
 from blacklist_token import blacklisted_tokens
+import requests as http_requests 
+from user_agents import parse
+import firebase_admin
+from firebase_admin import credentials, auth  
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate("firebase-adminsdk.json")  # Sesuaikan path-nya
+    firebase_admin.initialize_app(cred)
 
 google = oauth.create_client('google')
 
@@ -38,65 +47,83 @@ def send_otp_email(email, otp):
 
 def register():
     data = request.get_json()
-    username = data.get("username")
-    email = data.get("email")
-    password = data.get("password")
-    confirm = data.get("confirm")
+    username = data['username']
+    email = data['email']
+    password = data['password']
 
-    if not all([username, email, password, confirm]):
-        return jsonify({"msg": "Lengkapi semua data"}), 400
+    user = User.query.filter_by(email=email).first()
 
-    if password != confirm:
-        return jsonify({"msg": "Password tidak cocok"}), 400
+    # 🔁 Jika user sudah ada tapi belum verifikasi OTP, update OTP dan kirim ulang
+    if user:
+        if not user.is_verified:
+            user.username = username  # biar user bisa ubah nama pas retry register
+            user.password = bcrypt.generate_password_hash(password).decode('utf-8')
+            user.otp = str(random.randint(100000, 999999))
+            user.created_at = datetime.utcnow()
+            db.session.commit()
 
-    if User.query.filter((User.username == username) | (User.email == email)).first():
-        return jsonify({"msg": "Username atau email sudah digunakan"}), 400
+            send_otp_email(user.email, user.otp)
+            return jsonify({"message": "Akun sudah terdaftar tapi belum verifikasi. OTP baru telah dikirim."}), 200
+        
+        # ✅ Kalau sudah terverifikasi, tolak
+        return jsonify({"message": "Email sudah digunakan"}), 409
 
-    hashed = bcrypt.generate_password_hash(password).decode('utf-8')
-    otp_code = str(random.randint(100000, 999999))
+    # ✳️ Buat akun baru
+    hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+    otp = str(random.randint(100000, 999999))
 
-    user = User(username=username, email=email, password=hashed, otp=otp_code, is_verified=False)
-    user.generate_api_key()
+    user = User(
+        username=username,
+        email=email,
+        password=hashed_password,
+        api_key=uuid.uuid4().hex,
+        is_verified=False,
+        otp=otp,
+        created_at=datetime.utcnow()
+    )
     db.session.add(user)
     db.session.commit()
 
-    send_otp_email(email, otp_code)
+    send_otp_email(user.email, otp)
 
-    return jsonify({
-        "msg": "Registrasi berhasil, cek email untuk OTP",
-        "user": {
-            "username": user.username,
-            "email": user.email
-        }
-    }), 201
+    return jsonify({"message": "Akun berhasil dibuat. Silakan verifikasi OTP."}), 201
+
 
 def login():
     data = request.get_json()
-    username = data.get("username")
-    password = data.get("password")
-
+    username = data.get('username')
+    password = data.get('password')
+    
     user = User.query.filter_by(username=username).first()
-    if user and bcrypt.check_password_hash(user.password, password):
-        access_token = create_access_token(identity=str(user.id))
-        
-        # ✅ Ambil JTI dari token yang baru dibuat
-        decoded = decode_token(access_token)
-        jti = decoded["jti"]
+    if not user or not bcrypt.check_password_hash(user.password, password):  # gunakan bcrypt
+        return jsonify({"message": "Username atau password salah"}), 401
 
-        # (Opsional) Simpan jti ke tabel LoginSession misalnya
-        # save_login_session(user_id=user.id, jti=jti)
 
+    # 🔒 Cek apakah user sudah verifikasi OTP
+    if not user.is_verified:
         return jsonify({
-            "msg": "Login berhasil",
-            "token": access_token,
-            "user": {
-                "username": user.username,
-                "email": user.email,
-                "api_key": user.api_key
-            }
-        }), 200
+            "message": "Akun belum diverifikasi. Silakan cek email untuk OTP."
+        }), 403
 
-    return jsonify({"msg": "Login gagal"}), 401
+    # ✅ Login berhasil
+    access_token = create_access_token(identity=str(user.id))
+
+    # Ambil JTI token
+    decoded = decode_token(access_token)
+    jti = decoded.get("jti")
+
+    # Simpan login session
+    save_login_session(user.id, jti)
+
+    return jsonify({
+        "msg": "Login berhasil",
+        "token": access_token,
+        "user": {
+            "username": user.username,
+            "email": user.email,
+            "api_key": user.api_key
+        }
+    }), 200
 
 @jwt_required()
 def logout():
@@ -146,50 +173,43 @@ def login_callback():
 def login_google_token():
     try:
         data = request.get_json()
-        print("Incoming JSON:", data)  # ✅ Log input dari Flutter
-
         token = data.get("id_token")
+
         if not token:
-            print("❌ Token not found in JSON")
             return jsonify({"msg": "Token tidak ditemukan"}), 400
 
-        client_id = current_app.config.get("GOOGLE_CLIENT_ID")
-        if not client_id:
-            print("❌ GOOGLE_CLIENT_ID not set in config")
-            return jsonify({"msg": "Konfigurasi server tidak lengkap"}), 500
+        # ✅ Verifikasi token Google via Firebase
+        decoded_token = auth.verify_id_token(token)
 
-        print("✅ Token received:", token[:30] + "...")  # hanya tampil sebagian
-        print("✅ Verifying with client_id:", client_id)
-
-        # Verifikasi token Google
-        idinfo = id_token.verify_oauth2_token(token, requests.Request(), client_id)
-
-        email = idinfo.get("email")
-        username = idinfo.get("name", "user").replace(" ", "").lower()
-
-        print("✅ Google user info:", {"email": email, "username": username})
+        email = decoded_token.get("email")
+        username = decoded_token.get("name", "user").replace(" ", "").lower()
 
         if not email:
             return jsonify({"msg": "Email tidak ditemukan dalam token"}), 400
 
-        # Cek user
+        # ✅ Cari user, buat kalau belum ada
         user = User.query.filter_by(email=email).first()
         if not user:
             user = User(
                 username=username,
                 email=email,
-                password="",
+                password="",       # Tidak digunakan
                 otp="",
-                is_verified=True
+                is_verified=True,
+                api_key=generate_api_key()
             )
-            user.generate_api_key()
             db.session.add(user)
             db.session.commit()
-            print("✅ User baru dibuat:", username)
-        else:
-            print("✅ User ditemukan:", username)
 
-        access_token = create_custom_token(user.id)
+        # ✅ Buat JWT token
+        access_token = create_access_token(identity=str(user.id))
+
+        # Ambil JTI untuk sesi login
+        decoded = decode_token(access_token)
+        jti = decoded.get("jti")
+
+        # Simpan riwayat login
+        save_login_session(user.id, jti)
 
         return jsonify({
             "msg": "Login OAuth berhasil",
@@ -201,14 +221,11 @@ def login_google_token():
             }
         }), 200
 
-    except ValueError as e:
-        print("❌ Error verifikasi token:", str(e))
+    except auth.InvalidIdTokenError as e:
         return jsonify({"msg": "Token tidak valid", "error": str(e)}), 400
 
     except Exception as e:
-        print("❌ Error lain:", str(e))
         return jsonify({"msg": "Terjadi kesalahan", "error": str(e)}), 500
-
 
 def request_reset():
     data = request.get_json()
@@ -219,7 +236,7 @@ def request_reset():
         return jsonify({"msg": "Email tidak ditemukan"}), 404
 
     token = generate_token(user.email)
-    reset_link = f"http://localhost:5000/#/reset-password?token={token}"
+    reset_link = f"https://visionaid.lolihunter.my.id/api/auth/reset-password-view?token={token}"
 
     msg = Message("Reset Password VisionAid", recipients=[user.email])
     msg.body = f"Klik link berikut untuk reset password: {reset_link}"
@@ -290,11 +307,76 @@ def verify_otp():
 
 @jwt_required()
 def get_login_history():
-    current_user_id = get_jwt()
-    sessions = LoginSession.query.filter_by(user_id=current_user_id).all()
+    current_user_id = get_jwt_identity()
+    sessions = LoginSession.query.filter_by(user_id=current_user_id).order_by(LoginSession.login_time.desc()).all()
 
     return jsonify([{
         "device": s.device_info,
         "ip": s.ip_address,
         "login_time": s.login_time.isoformat()
     } for s in sessions]), 200
+
+def save_login_session(user_id, jti):
+    ip = request.headers.get('X-Forwarded-For') or request.remote_addr
+    ua_string = request.headers.get('User-Agent', 'Unknown')
+    user_agent = parse(ua_string)
+
+    device_info = f"{user_agent.os.family} - {user_agent.device.family} ({user_agent.browser.family})"
+
+    session = LoginSession(
+        user_id=user_id,
+        ip_address=ip,
+        device_info=device_info,
+        jwt_jti=jti
+    )
+    db.session.add(session)
+    db.session.commit()
+
+
+@jwt_required()
+def update_username():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    new_username = data.get('username')
+
+    if not new_username:
+        return jsonify({'error': 'Username tidak boleh kosong'}), 400
+
+    user = User.query.get(user_id)
+    user.username = new_username
+    db.session.commit()
+
+    # Generate new token
+    access_token = create_access_token(identity=str(user.id))
+
+    return jsonify({'msg': 'Username updated', 'token': access_token}), 200
+
+@jwt_required()
+def update_password():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    old_pw = data.get('old_password')
+    new_pw = data.get('new_password')
+
+    user = User.query.get(user_id)
+
+    if not bcrypt.check_password_hash(user.password, old_pw):
+        return jsonify({'error': 'Password lama salah'}), 400
+
+    user.password = bcrypt.generate_password_hash(new_pw)
+    db.session.commit()
+
+    # Generate new token
+    access_token = create_access_token(identity=str(user.id))
+
+    return jsonify({'msg': 'Password updated', 'token': access_token}), 200
+
+
+
+def reset_password_view():
+    token = request.args.get('token')
+    email = verify_token(token)
+    if not email:
+        return "Token tidak valid atau kadaluarsa", 400
+    return render_template("reset_password.html", token=token)
+
